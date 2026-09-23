@@ -9,7 +9,6 @@ using Polytoria.Datamodel.Creator;
 #endif
 using Polytoria.Scripting;
 using Polytoria.Shared;
-using Polytoria.Utils;
 
 namespace Polytoria.Datamodel;
 
@@ -17,7 +16,12 @@ namespace Polytoria.Datamodel;
 public partial class UIField : Instance
 {
 	internal Control NodeControl = null!;
-	internal StyleBoxFlat _styleBox = new() { AntiAliasing = true, AntiAliasingSize = 2 };
+	internal StyleBoxFlat _styleBox = new()
+	{
+		AntiAliasing = true,
+		AntiAliasingSize = 1,
+		CornerDetail = 20,
+	};
 	private Panel? _bgPanel;
 	private Vector2 _positionOffset = new(0, 0);
 	private Vector2 _positionRelative = new(0.5f, 0.5f);
@@ -232,7 +236,7 @@ public partial class UIField : Instance
 		IsParentedToCreatorGUI = IsDescendantOfClass<CreatorGUI>();
 		if (!IsParentedToCreatorGUI)
 		{
-			NodeControl.MouseFilter = Control.MouseFilterEnum.Pass;
+			NodeControl.MouseFilter = IgnoreMouse ? Control.MouseFilterEnum.Ignore : Control.MouseFilterEnum.Pass;
 			NodeControl.FocusMode = Control.FocusModeEnum.Click;
 		}
 #endif
@@ -460,6 +464,21 @@ public partial class UIField : Instance
 				MouseUp.Invoke();
 			}
 		}
+
+		if (@event is InputEventScreenTouch touch)
+		{
+			if (touch.Pressed)
+			{
+				MouseDown.Invoke();
+			}
+			else
+			{
+				MouseUp.Invoke();
+			}
+
+			NodeControl.AcceptEvent();
+			return;
+		}
 	}
 
 	private bool IsMouseOverChildUIField()
@@ -514,6 +533,54 @@ public partial class UIField : Instance
 		}
 
 		Vector2 size = _sizeOffset + (parentSize * _sizeRelative);
+
+
+		UIAspectRatioRestraint? aspectRatioConstraint = (UIAspectRatioRestraint?)FindChildByClass("UIAspectRatioRestraint");
+		if (aspectRatioConstraint != null)
+		{
+			Vector2? maxSize;
+			switch (aspectRatioConstraint.ScaleType)
+			{
+				case AspectRatioScaleTypeEnum.FitContainer:
+					maxSize = parentSize;
+					break;
+				case AspectRatioScaleTypeEnum.FitMaxSize:
+					maxSize = size;
+					break;
+				default:
+					maxSize = null;
+					break;
+			}
+
+			if (aspectRatioConstraint.DominantAxis == DominantAxisEnum.Width)
+			{
+				size.Y = size.X / aspectRatioConstraint.AspectRatio;
+			}
+			else
+			{
+				size.X = size.Y / aspectRatioConstraint.AspectRatio;
+			}
+
+			if (maxSize != null && (maxSize.Value.X < size.X || maxSize.Value.Y < size.Y))
+			{
+				Vector2 ratio;
+				float subordinateAxis = 1 / aspectRatioConstraint.AspectRatio;
+				float dominantAxis = 1;
+				float higherAxis = Mathf.Max(dominantAxis, subordinateAxis);
+				dominantAxis /= higherAxis;
+				subordinateAxis /= higherAxis;
+
+				if (aspectRatioConstraint.DominantAxis == DominantAxisEnum.Width)
+				{
+					ratio = new Vector2(dominantAxis, subordinateAxis);
+				}
+				else
+				{
+					ratio = new Vector2(subordinateAxis, dominantAxis);
+				}
+				size = ratio * Mathf.Min(maxSize.Value.X, maxSize.Value.Y);
+			}
+		}
 
 		NodeControl.CustomMinimumSize = size;
 

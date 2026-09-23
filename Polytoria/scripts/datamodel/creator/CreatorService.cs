@@ -374,22 +374,40 @@ public sealed partial class CreatorService : Node, IScriptObject
 
 		PreferredEditorEnum userPref = CreatorSettingsService.Instance.Get<PreferredEditorEnum>(CreatorSettingKeys.CodeEditor.PreferredEditor);
 
-		if (Globals.ScriptFileExtensions.Contains(path.GetExtension()))
+		if (userPref == PreferredEditorEnum.BuiltIn)
 		{
-			if (userPref == PreferredEditorEnum.BuiltIn)
+			FileTypeEnum codeCompletion = FileTypeEnum.Plaintext;
+			if (Globals.ScriptFileExtensions.Contains(path.GetExtension()))
 			{
-				Tabs.Singleton.Insert(new Tabs.TextEditorTab() { Session = CurrentSession, TargetPath = pathRelative, Title = pathRelative.GetFile() });
-				return;
+				codeCompletion = FileTypeEnum.Lua;
 			}
-		}
 
-		if (userPref == PreferredEditorEnum.VSCode)
+			Tabs.Singleton.Insert(new Tabs.TextEditorTab()
+			{
+				Session = CurrentSession,
+				TargetPath = pathRelative,
+				CodeCompletion = codeCompletion,
+				Title = pathRelative.GetFile()
+			});
+			return;
+		}
+		else if (userPref == PreferredEditorEnum.VSCode)
 		{
 			CurrentSession.CreateVSCodeConfig();
 			// open in vscode
 			System.Diagnostics.Process p = new();
-			p.StartInfo.FileName = "code";
-			p.StartInfo.Arguments = $"\"{path}\" \"{CurrentSession.ProjectFolderPath}\"";
+
+			if (OS.HasFeature("macos"))
+			{
+				p.StartInfo.FileName = "open";
+				p.StartInfo.Arguments = $"-a \"Visual Studio Code\" \"{path}\" \"{CurrentSession.ProjectFolderPath}\"";
+			}
+			else
+			{
+				p.StartInfo.FileName = "code";
+				p.StartInfo.Arguments = $"\"{path}\" \"{CurrentSession.ProjectFolderPath}\"";
+			}
+
 			p.StartInfo.UseShellExecute = true;
 			p.StartInfo.WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden;
 			p.Start();
@@ -399,8 +417,18 @@ public sealed partial class CreatorService : Node, IScriptObject
 		{
 			// open in zed
 			System.Diagnostics.Process p = new();
-			p.StartInfo.FileName = "zed";
-			p.StartInfo.Arguments = $"\"{path}\" \"{CurrentSession.ProjectFolderPath}\"";
+
+			if (OS.HasFeature("macos"))
+			{
+				p.StartInfo.FileName = "open";
+				p.StartInfo.Arguments = $"-a Zed \"{path}\" \"{CurrentSession.ProjectFolderPath}\"";
+			}
+			else
+			{
+				p.StartInfo.FileName = "zed";
+				p.StartInfo.Arguments = $"\"{path}\" \"{CurrentSession.ProjectFolderPath}\"";
+			}
+
 			p.StartInfo.UseShellExecute = true;
 			p.StartInfo.WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden;
 			p.Start();
@@ -517,23 +545,33 @@ public sealed partial class CreatorService : Node, IScriptObject
 
 		LocalTestIDToSession.Add(debugID, session);
 		SessionToLocalTestID.Add(session, debugID);
-		await StartLocalTestOnEntry(session.ProjectFolderPath, game.WorldFilePath!, debugID, GD.RandRange(20000, 30000), false, atCamera ? game.CreatorContext.Freelook.Position : null);
+		await StartLocalTestOnEntry(
+			session.ProjectFolderPath,
+			game.WorldFilePath!,
+			debugID,
+			GD.RandRange(20000, 30000),
+			false,
+			atCamera ? game.CreatorContext.Freelook.Position : null,
+			atCamera ?
+				Mathf.RadToDeg(Mathf.Atan2(game.CreatorContext.Freelook.Forward.X, game.CreatorContext.Freelook.Forward.Z))
+				: null
+			);
 
 		DebugConsole.Singleton.Clear();
 		LocalTestStarted.Invoke();
 	}
 
-	public async Task StartLocalTestOnEntry(string projectPath, string entryPath, string debugID, int port, bool isSubplace, Vector3? spawnPos = null)
+	public async Task StartLocalTestOnEntry(string projectPath, string entryPath, string debugID, int port, bool isSubplace, Vector3? spawnPos = null, float? spawnRot = null)
 	{
 		string tempPath = Path.GetTempPath();
 		string placeFilePath = tempPath.PathJoin("pt_test_" + new DateTimeOffset(DateTime.Now).Millisecond + ".zip");
 
 		await PackedFormat.PackProjectToFile(projectPath, placeFilePath, Interface.LoadOverlay.CreateProgressReporter("Starting local test..."));
 		Interface.LoadOverlay?.Hide();
-		StartLocalTestServer(placeFilePath, entryPath, debugID, port, isSubplace, spawnPos);
+		StartLocalTestServer(placeFilePath, entryPath, debugID, port, isSubplace, spawnPos, spawnRot);
 	}
 
-	private void StartLocalTestServer(string placeFilePath, string entryPath, string debugID, int port, bool isSubplace = false, Vector3? spawnPos = null)
+	private void StartLocalTestServer(string placeFilePath, string entryPath, string debugID, int port, bool isSubplace = false, Vector3? spawnPos = null, float? spawnRot = null)
 	{
 		string exePath = OS.GetExecutablePath();
 
@@ -542,6 +580,10 @@ public sealed partial class CreatorService : Node, IScriptObject
 		if (spawnPos != null)
 		{
 			args.AddRange(["-spawnpos", $"v{(int)spawnPos.Value.X},{(int)spawnPos.Value.Y},{(int)spawnPos.Value.Z}"]);
+		}
+		if (spawnRot != null)
+		{
+			args.AddRange(["-spawnrot", $"v{spawnRot}"]);
 		}
 
 		if (isSubplace)
@@ -643,4 +685,10 @@ public enum ScriptTypeEnum
 	Client,
 	Module,
 	Unknown
+}
+
+public enum FileTypeEnum
+{
+	Plaintext,
+	Lua
 }

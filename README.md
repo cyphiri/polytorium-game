@@ -3,7 +3,7 @@
 # Polytorium (Polytoria)
 
 [![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg)](https://opensource.org/licenses/MPL-2.0)
-[![Godot Engine](https://img.shields.io/badge/Godot-4.6.2-blue?logo=godot-engine)](https://godotengine.org/)
+[![Godot Engine](https://img.shields.io/badge/Godot-4.7-blue?logo=godot-engine)](https://godotengine.org/)
 [![.NET](https://img.shields.io/badge/.NET-10-purple?logo=dotnet)](https://dotnet.microsoft.com/)
 
 Polytorium is a fork of Polytoria (see more at https://github.com/Polytoria/polytoria-game), and has the goal of adding as much compatability as possible. 

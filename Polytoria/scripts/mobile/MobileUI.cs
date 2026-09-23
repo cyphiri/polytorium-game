@@ -47,6 +47,10 @@ public partial class MobileUI : Control
 
 		AddChild(_deepLink, true);
 
+		var initResult = _deepLink.Initialize();
+
+		_deepLink.DeeplinkReceived += OnDeeplinkReceived;
+
 		if (Globals.IsMobileBuild)
 		{
 			GetTree().Root.ContentScaleFactor = Globals.MobileScale;
@@ -72,8 +76,6 @@ public partial class MobileUI : Control
 		{
 			_ = PolyMobileAuthAPI.LoginWithCodeAndState(mobileCode, mobileState);
 		}
-
-		_deepLink.DeeplinkReceived += OnDeeplinkReceived;
 
 		_mainView = GetNode<Control>("Layout/MainView");
 		if (Globals.IsMobileBuild)
@@ -184,6 +186,7 @@ public partial class MobileUI : Control
 				MobileViewEnum.PlaceInfo => "res://scenes/mobile/views/place_info.tscn",
 				MobileViewEnum.Avatar => "res://scenes/mobile/views/avatar.tscn",
 				MobileViewEnum.Dev => "res://scenes/mobile/views/test.tscn",
+				MobileViewEnum.Profile => "res://scenes/mobile/views/profile.tscn",
 				_ => throw new ArgumentOutOfRangeException(nameof(viewEnum),
 					 $"No scene defined for {viewEnum}")
 			};
@@ -212,5 +215,6 @@ public enum MobileViewEnum
 	Avatar,
 	Store,
 	Dev,
-	PlaceInfo
+	PlaceInfo,
+	Profile
 }

@@ -123,6 +123,11 @@ public sealed partial class CreatorHistory : Instance
 		_currentAction = null;
 	}
 
+	public void CancelAction()
+	{
+		_currentAction = null;
+	}
+
 	/// <summary>
 	/// Group the instances and add to history
 	/// </summary>
@@ -159,6 +164,8 @@ public sealed partial class CreatorHistory : Instance
 		Instance[] originalModels = instances;
 		Instance[]? ungroupedChildren = null;
 
+		GroupAsEnum ungroupType = instances.Length > 0 ? GetGroupAsEnum(instances[0]) : GroupAsEnum.Model;
+
 		NewAction("Ungroup instances");
 
 		AddDoCallback(new((_) =>
@@ -170,12 +177,19 @@ public sealed partial class CreatorHistory : Instance
 		{
 			if (ungroupedChildren != null)
 			{
-				originalModels = [Root.CreatorContext.Selections.GroupInstances(ungroupedChildren)];
+				originalModels = [Root.CreatorContext.Selections.GroupInstances(ungroupedChildren, ungroupType)];
 			}
 		}));
 
 		CommitAction();
 	}
+
+	private static GroupAsEnum GetGroupAsEnum(Instance instance) => instance switch
+	{
+		RigidBody => GroupAsEnum.RigidBody,
+		Folder => GroupAsEnum.Folder,
+		_ => GroupAsEnum.Model,
+	};
 
 	public void ToggleLockedDynamics(Dynamic[] dyns)
 	{
@@ -196,6 +210,8 @@ public sealed partial class CreatorHistory : Instance
 
 	public void DuplicateInstances(Instance[] instances)
 	{
+		Root.CreatorContext.Gizmos.PauseDrag();
+
 		Instance[]? child = null;
 
 		NewAction("Duplicate instances");
@@ -215,6 +231,8 @@ public sealed partial class CreatorHistory : Instance
 			}
 		}));
 		CommitAction();
+
+		Root.CreatorContext.Gizmos.ResumeDrag();
 	}
 
 	public void DeleteInstances(Instance[] instances)

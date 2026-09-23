@@ -13,10 +13,9 @@ using Polytoria.Utils;
 using Polytoria.Utils.DTOs;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
-using System.Reflection;
-using System.Text.Json;
 using System.Threading.Tasks;
 using static Polytoria.Datamodel.Services.NetworkService;
 
@@ -69,6 +68,28 @@ public sealed partial class NetworkPropSync : Instance
 		}
 	}
 
+	public override void PreDelete()
+	{
+		SetProcess(false);
+		_pendingProps.Clear();
+		PendingRefs.Clear();
+		_batchBroadcasts.Clear();
+		base.PreDelete();
+	}
+
+	public static T DeserializeRpcArg<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.All)] T>(byte[] data)
+	{
+		try
+		{
+			return SerializeUtils.Deserialize<T>(data)!;
+		}
+		catch (Exception ex)
+		{
+			PT.PrintErr("Failed to deserialize RPC argument: ", ex);
+			throw;
+		}
+	}
+
 	public static byte[] SerializePropValue(object? propValue)
 	{
 		if (propValue == null)
@@ -78,12 +99,14 @@ public sealed partial class NetworkPropSync : Instance
 
 		if (propValue is Vector2 v2) propValue = new Vector2Dto(v2);
 		else if (propValue is Vector3 v3) propValue = new Vector3Dto(v3);
+		else if (propValue is Quaternion q) propValue = new UnitQuaternionUInt64Dto(q);
 		else if (propValue is Color c) propValue = new ColorDto(c);
 		else if (propValue is Transform3D t) propValue = new Transform3DDto(t);
 		else if (propValue is ColorSeries cs) propValue = new ColorSeriesDto(cs);
 		else if (propValue is NumberSeries ns) propValue = new NumberSeriesDto(ns);
 		else if (propValue is NumberRange nr) propValue = new NumberRangeDto(nr);
 		else if (propValue is UIScale us) propValue = new UIScaleDto(us);
+		else if (propValue is Variant v) propValue = new VariantDto(v);
 
 		Type propType = propValue.GetType();
 
@@ -129,6 +152,11 @@ public sealed partial class NetworkPropSync : Instance
 			Vector3Dto? dto = SerializeUtils.Deserialize<Vector3Dto?>(data);
 			if (dto != null) intermediateValue = dto.ToVector3();
 		}
+		else if (targetType == typeof(Quaternion))
+		{
+			UnitQuaternionUInt64Dto? dto = SerializeUtils.Deserialize<UnitQuaternionUInt64Dto?>(data);
+			if (dto != null) intermediateValue = dto.ToQuaternion();
+		}
 		else if (targetType == typeof(Color))
 		{
 			ColorDto? dto = SerializeUtils.Deserialize<ColorDto?>(data);
@@ -158,6 +186,11 @@ public sealed partial class NetworkPropSync : Instance
 		{
 			UIScaleDto? dto = SerializeUtils.Deserialize<UIScaleDto?>(data);
 			if (dto != null) intermediateValue = dto.ToUIScale();
+		}
+		else if (targetType == typeof(Variant))
+		{
+			VariantDto? dto = SerializeUtils.Deserialize<VariantDto?>(data);
+			if (dto != null) intermediateValue = dto.ToVariant();
 		}
 		else
 		{
@@ -200,12 +233,14 @@ public sealed partial class NetworkPropSync : Instance
 		}
 		if (propValue is Vector2 v2) propValue = new Vector2Dto(v2);
 		else if (propValue is Vector3 v3) propValue = new Vector3Dto(v3);
+		else if (propValue is Quaternion q) propValue = new UnitQuaternionUInt64Dto(q);
 		else if (propValue is Color c) propValue = new ColorDto(c);
 		else if (propValue is Transform3D t) propValue = new Transform3DDto(t);
 		else if (propValue is ColorSeries cs) propValue = new ColorSeriesDto(cs);
 		else if (propValue is NumberSeries ns) propValue = new NumberSeriesDto(ns);
 		else if (propValue is NumberRange nr) propValue = new NumberRangeDto(nr);
 		else if (propValue is UIScale us) propValue = new UIScaleDto(us);
+		else if (propValue is Variant v) propValue = new VariantDto(v);
 		Type propType = propValue.GetType();
 
 		using var ms = new MemoryStream();
@@ -251,6 +286,11 @@ public sealed partial class NetworkPropSync : Instance
 			Vector3Dto? dto = await SerializeUtils.DeserializeAsync<Vector3Dto?>(mem);
 			if (dto != null) intermediateValue = dto.ToVector3();
 		}
+		else if (targetType == typeof(Quaternion))
+		{
+			UnitQuaternionUInt64Dto? dto = await SerializeUtils.DeserializeAsync<UnitQuaternionUInt64Dto?>(mem);
+			if (dto != null) intermediateValue = dto.ToQuaternion();
+		}
 		else if (targetType == typeof(Color))
 		{
 			ColorDto? dto = await SerializeUtils.DeserializeAsync<ColorDto?>(mem);
@@ -280,6 +320,11 @@ public sealed partial class NetworkPropSync : Instance
 		{
 			UIScaleDto? dto = await SerializeUtils.DeserializeAsync<UIScaleDto?>(mem);
 			if (dto != null) intermediateValue = dto.ToUIScale();
+		}
+		else if (targetType == typeof(Variant))
+		{
+			VariantDto? dto = await SerializeUtils.DeserializeAsync<VariantDto?>(mem);
+			if (dto != null) intermediateValue = dto.ToVariant();
 		}
 		else
 		{
@@ -313,7 +358,7 @@ public sealed partial class NetworkPropSync : Instance
 		return intermediateValue;
 	}
 
-	public void BroadcastPropUpdate(NetworkedObject netObj, string propName, object? propValue, bool unreliable)
+	public void BroadcastPropUpdate(NetworkedObject netObj, PropSyncProp prop, object? propValue, bool unreliable)
 	{
 		if (!netObj.IsNetworkReady) return;
 		if (!netObj.Root.IsLoaded) return;
@@ -327,10 +372,10 @@ public sealed partial class NetworkPropSync : Instance
 			}
 		}
 		string netID = netObj.NetworkedObjectID;
-		byte[] data = SerializePropValue(propValue);
-		long sequence = netObj.GetSequenceForProp(propName);
+		byte[] data = prop.Serialize(propValue);
+		long sequence = netObj.GetSequenceForProp(prop.Name);
 
-		_batchBroadcasts.Add(new() { NetID = netID, PropName = propName, PropValueRaw = data, IsUnreliable = unreliable, ExcludePeer = -1, Sequence = sequence });
+		_batchBroadcasts.Add(new() { NetID = netID, PropName = prop.Name, PropValueRaw = data, IsUnreliable = unreliable, ExcludePeer = -1, Sequence = sequence });
 	}
 
 	public void NetSendAllPropUpdate(NetworkedObject netObj, int toPeerId)
@@ -338,20 +383,15 @@ public sealed partial class NetworkPropSync : Instance
 		NetPropReplicateData[] propData = netObj.GetNetPropReplicateData();
 		string netID = netObj.NetworkedObjectID;
 
-		RpcId(toPeerId, nameof(NetRecvPropUpdateBatch), netID, JsonSerializer.Serialize(propData, NetDataGenerationContext.Default.NetPropReplicateDataArray));
+		RpcId(toPeerId, nameof(NetRecvPropUpdateBatch), netID, SerializeUtils.Serialize(propData));
 	}
 
-	public void BroadcastPropUpdateToServer(NetworkedObject netObj, string propName, object? propValue, bool unreliable)
+	public void BroadcastPropUpdateToServer(NetworkedObject netObj, PropSyncProp prop, object? propValue, bool unreliable)
 	{
 		if (!netObj.IsNetworkReady) return;
 		if (!netObj.Root.IsLoaded) return;
 
-		PropertyInfo? propInfo = netObj.GetSyncProperty(propName);
-
-		if (propInfo == null) return;
-
-		// Check authority
-		if (!CheckPropHasAuthority(propInfo, netObj, NetService.LocalPeerID)) return;
+		if (!CheckPropHasAuthority(prop, netObj, NetService.LocalPeerID)) return;
 
 		if (propValue is NetworkedObject nobj)
 		{
@@ -362,15 +402,15 @@ public sealed partial class NetworkPropSync : Instance
 			}
 		}
 		string netID = netObj.NetworkedObjectID;
-		byte[] data = SerializePropValue(propValue);
+		byte[] data = prop.Serialize(propValue);
 
 		if (unreliable)
 		{
-			RpcId(1, nameof(NetRecvPropUpdateToServerUnreliable), netID, propName, data);
+			RpcId(1, nameof(NetRecvPropUpdateToServerUnreliable), netID, prop.Name, data);
 		}
 		else
 		{
-			RpcId(1, nameof(NetRecvPropUpdateToServer), netID, propName, data);
+			RpcId(1, nameof(NetRecvPropUpdateToServer), netID, prop.Name, data);
 		}
 	}
 
@@ -392,43 +432,39 @@ public sealed partial class NetworkPropSync : Instance
 
 		if (netObj != null)
 		{
-			PropertyInfo? propInfo = netObj.GetSyncProperty(propName);
+			PropSyncProp? entry = PropSyncRegistry.GetProp(netObj.GetType(), propName);
 
-			// Target property doesn't exist
-			if (propInfo == null) return;
+			if (entry == null) return;
 
-			if (CheckPropHasAuthority(propInfo, netObj, peerID))
+			if (CheckPropHasAuthority(entry, netObj, peerID))
 			{
-				// Mark -1 to ignore sequence
 				netObj.RecvPropUpdate(propName, propValueRaw, -1);
 				_batchBroadcasts.Add(new() { NetID = netObj.NetworkedObjectID, PropName = propName, PropValueRaw = propValueRaw, IsUnreliable = isUnreliable, ExcludePeer = peerID, Sequence = -1 });
 			}
 		}
 	}
 
-	public static bool CheckPropHasAuthority(PropertyInfo propInfo, NetworkedObject netObj, int peerID)
-	{
-		SyncVarAttribute? sv = propInfo.GetCustomAttribute<SyncVarAttribute>();
+	public static bool CheckPropHasAuthority(PropSyncProp prop, NetworkedObject netObj, int peerID) =>
+		CheckPropHasAuthority(prop.HasSyncVar, prop.AllowAuthorWrite, prop.ServerOnly, netObj, peerID);
 
+	private static bool CheckPropHasAuthority(bool hasSyncVar, bool allowAuthorWrite, bool serverOnly, NetworkedObject netObj, int peerID)
+	{
 		bool hasAuthority = false;
 
-		if (sv != null)
+		if (hasSyncVar)
 		{
-			if (sv.AllowAuthorWrite && netObj.NetworkAuthority == peerID)
+			if (allowAuthorWrite && netObj.NetworkAuthority == peerID)
 			{
-				// Has authority from AllowAuthorWrite
 				hasAuthority = true;
 			}
 
-			if (sv.ServerOnly && peerID != 1)
+			if (serverOnly && peerID != 1)
 			{
-				// Disallow if from non server
 				hasAuthority = false;
 			}
 		}
 		else
 		{
-			// Check normally via NetPropAuthority
 			hasAuthority = CheckAuthority(peerID, netObj.NetPropAuthority);
 		}
 
@@ -436,10 +472,21 @@ public sealed partial class NetworkPropSync : Instance
 	}
 
 	[NetRpc(AuthorityMode.Authority, TransferMode = TransferMode.Reliable, TransferChannel = 1)]
-	private void NetRecvPropUpdateBatch(string nodePath, string propDataRaw)
+	private void NetRecvPropUpdateBatch(string netID, byte[] propDataRaw)
 	{
-		NetworkedObject? netObj = NetService.Root.GetNetObj(nodePath);
-		NetPropReplicateData[] propReplicates = JsonSerializer.Deserialize(propDataRaw, NetDataGenerationContext.Default.NetPropReplicateDataArray)!;
+		NetPropReplicateData[] propReplicates;
+		try
+		{
+			propReplicates = propDataRaw is { Length: > 0 }
+				? SerializeUtils.Deserialize<NetPropReplicateData[]>(propDataRaw) ?? []
+				: [];
+		}
+		catch (Exception ex)
+		{
+			PT.PrintErr("Failed to deserialize prop batch for ", netID, ": ", ex);
+			return;
+		}
+		NetworkedObject? netObj = NetService.Root.GetNetObj(netID);
 
 		if (netObj != null)
 		{
@@ -451,10 +498,10 @@ public sealed partial class NetworkPropSync : Instance
 		else
 		{
 			// Queue the batch until netObj exists
-			if (!_pendingProps.TryGetValue(nodePath, out List<NetPropReplicateData>? value))
+			if (!_pendingProps.TryGetValue(netID, out List<NetPropReplicateData>? value))
 			{
 				value = [];
-				_pendingProps[nodePath] = value;
+				_pendingProps[netID] = value;
 			}
 
 			value.AddRange(propReplicates);
@@ -521,12 +568,16 @@ public sealed partial class NetworkPropSync : Instance
 		if (NetService.NetInstance == null) return;
 
 		var rpcName = unreliable ? nameof(NetRecvBatchedPropsUnreliable) : nameof(NetRecvBatchedPropsReliable);
-		var data = SerializeUtils.Serialize(payload);
+		byte[] packet = BuildRpcPacket(rpcName, SerializeUtils.Serialize(payload));
+		TransferMode transferMode = unreliable ? TransferMode.Unreliable : TransferMode.Reliable;
 
-		foreach (int peerID in NetService.NetInstance.PeerIds)
+		if (excludePeer == -1)
 		{
-			if (peerID != excludePeer)
-				RpcId(peerID, rpcName, data);
+			NetService.NetInstance.BroadcastMessage(packet, transferMode);
+		}
+		else
+		{
+			NetService.NetInstance.BroadcastMessageExcept(packet, transferMode, 0, excludePeer);
 		}
 	}
 

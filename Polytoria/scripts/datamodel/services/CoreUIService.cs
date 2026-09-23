@@ -2,7 +2,6 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-using Godot;
 using Polytoria.Attributes;
 using Polytoria.Client.UI;
 using Polytoria.Scripting;
@@ -16,6 +15,7 @@ public sealed partial class CoreUIService : Instance
 {
 	private const string CoreUIPath = "res://scenes/client/ui/core_ui.tscn";
 
+	private int _chatBubbleRenderDistance = 40;
 	private bool _useUserCard = true;
 	private bool _useChat = true;
 	private bool _useHealthBar = true;
@@ -31,7 +31,8 @@ public sealed partial class CoreUIService : Instance
 
 	public PTSignal CtrlLockCursorChanged { get; private set; } = new();
 
-
+	[ScriptProperty]
+	public static float TopInset => 80;
 
 	[Editable, ScriptProperty]
 	public CtrlLockCursorEnum CtrlLockCursor
@@ -44,6 +45,13 @@ public sealed partial class CoreUIService : Instance
 			OnPropertyChanged();
 			CtrlLockCursorChanged.Invoke();
 		}
+	}
+
+	[Editable, ScriptProperty]
+	public int ChatBubbleRenderDistance
+	{
+		get => _chatBubbleRenderDistance;
+		set { _chatBubbleRenderDistance = value; }
 	}
 
 	[Editable, ScriptProperty, ScriptLegacyProperty("UserCardEnabled")]
@@ -126,6 +134,12 @@ public sealed partial class CoreUIService : Instance
 			CoreUI.HealthBar.Visible = UseHealthBar;
 			CoreUI.Leaderboard.Visible = UseLeaderboard;
 			CoreUI.Inventory.Visible = UseHotbar;
+			CoreUI.InventoryButton.Visible = UseBackpack;
+			if (!UseBackpack)
+			{
+				CoreUI.Inventory.CloseBackpack();
+				CoreUI.InventoryButton.SetPressedNoSignal(false);
+			}
 			CoreUI.MenuButton.Visible = UseMenuButton;
 			CoreUI.EmoteWheel.UseEmoteWheel = UseEmoteWheel;
 		}

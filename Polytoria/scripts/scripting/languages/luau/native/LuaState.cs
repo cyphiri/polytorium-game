@@ -18,6 +18,7 @@ public partial class LuaState : IDisposable
 {
 	private IntPtr _state;
 	private readonly LuaState? _parent;
+	private readonly bool _ownsState;
 	private bool _disposed;
 
 	public const int LUA_MULTRET = -1;
@@ -37,6 +38,7 @@ public partial class LuaState : IDisposable
 
 	public LuaState()
 	{
+		_ownsState = true;
 		lock (_lock)
 		{
 			_state = NativeBindings.luaL_newstate();
@@ -48,6 +50,7 @@ public partial class LuaState : IDisposable
 	public LuaState(IntPtr state)
 	{
 		_state = state;
+		_ownsState = false;
 	}
 
 	public static LuaState FromIntPtr(IntPtr state)
@@ -67,19 +70,26 @@ public partial class LuaState : IDisposable
 		Marshal.StructureToPtr(options, optionsPtr, false);
 		*/
 
-		byte[] sourceBytes = Encoding.UTF8.GetBytes(sourceCode);
-		IntPtr size = new(sourceBytes.Length);
+		IntPtr size = new(Encoding.UTF8.GetByteCount(sourceCode));
 		IntPtr bytecodePtr = NativeBindings.luau_compile(sourceCode, size, IntPtr.Zero, out nint outSize);
 		if (bytecodePtr == IntPtr.Zero)
 		{
 			//Marshal.FreeHGlobal(optionsPtr);
 			throw new Exception("Error compiling Lua source code");
 		}
-		byte[] bytecode = new byte[outSize.ToInt32()];
-		Marshal.Copy(bytecodePtr, bytecode, 0, bytecode.Length);
-		Marshal.FreeHGlobal(bytecodePtr);
-		//Marshal.FreeHGlobal(optionsPtr);
-		return bytecode;
+		try
+		{
+			byte[] bytecode = GC.AllocateUninitializedArray<byte>(checked((int)outSize));
+			Marshal.Copy(bytecodePtr, bytecode, 0, bytecode.Length);
+			return bytecode;
+		}
+		finally
+		{
+			unsafe
+			{
+				NativeMemory.Free(bytecodePtr.ToPointer());
+			}
+		}
 	}
 
 	public LuaStatus Load(string name, byte[] compiled)
@@ -108,6 +118,7 @@ public partial class LuaState : IDisposable
 	{
 		_state = thread;
 		_parent = parent;
+		_ownsState = false;
 	}
 
 	public void OpenLibs()
@@ -129,6 +140,8 @@ public partial class LuaState : IDisposable
 		}
 		return GetTop() + index + 1;
 	}
+
+	public static int UpValIndex(int index) => LUA_GLOBALSINDEX - index;
 
 	/// <summary>
 	/// Pushes an integer with value n onto the stack. 
@@ -416,7 +429,7 @@ public partial class LuaState : IDisposable
 			NativeBindings.lua_pushboolean(_state, b ? 1 : 0);
 	}
 
-	public void PushCFunction(LuaFunction func, string name = "luafunc", int n = 0)
+	public void PushCFunction(LuaFunction func, string? name = null, int n = 0)
 	{
 		IntPtr userdataPtr = NewUserDataDTor((UIntPtr)IntPtr.Size, FunctionGarbageCollect);
 
@@ -531,15 +544,30 @@ public partial class LuaState : IDisposable
 		}
 
 		GCHandle handle = GCHandle.Alloc(obj);
-		PushLightUserData(GCHandle.ToIntPtr(handle));
+		IntPtr handlePtr = GCHandle.ToIntPtr(handle);
+		IntPtr userdataPtr = NewUserDataDTor((UIntPtr)IntPtr.Size, ManagedObjectGarbageCollect);
+		Marshal.WriteIntPtr(userdataPtr, handlePtr);
+	}
+
+	private static void ManagedObjectGarbageCollect(IntPtr ud)
+	{
+		IntPtr handlePtr = Marshal.ReadIntPtr(ud);
+		if (handlePtr == IntPtr.Zero) return;
+
+		GCHandle handle = GCHandle.FromIntPtr(handlePtr);
+		if (handle.IsAllocated)
+			handle.Free();
 	}
 
 	public object? ToObject(int index)
 	{
-		if (IsNil(index) || !IsLightUserData(index))
+		if (IsNil(index) || !IsUserData(index))
 			return null;
 
-		IntPtr data = ToUserData(index);
+		IntPtr userdata = ToUserData(index);
+		if (userdata == IntPtr.Zero)
+			return null;
+		IntPtr data = Marshal.ReadIntPtr(userdata);
 		if (data == IntPtr.Zero)
 			return null;
 
@@ -552,10 +580,13 @@ public partial class LuaState : IDisposable
 
 	public T? ToObject<T>(int index, bool freeGCHandle = true)
 	{
-		if (IsNil(index) || !IsLightUserData(index))
+		if (IsNil(index) || !IsUserData(index))
 			return default;
 
-		IntPtr data = ToUserData(index);
+		IntPtr userdata = ToUserData(index);
+		if (userdata == IntPtr.Zero)
+			return default;
+		IntPtr data = Marshal.ReadIntPtr(userdata);
 		if (data == IntPtr.Zero)
 			return default;
 
@@ -566,7 +597,10 @@ public partial class LuaState : IDisposable
 		T? reference = (T?)handle.Target;
 
 		if (freeGCHandle)
+		{
 			handle.Free();
+			Marshal.WriteIntPtr(userdata, IntPtr.Zero);
+		}
 
 		return reference;
 	}
@@ -659,6 +693,12 @@ public partial class LuaState : IDisposable
 	{
 		lock (_lock)
 			return (LuaStatus)NativeBindings.lua_status(_state);
+	}
+
+	public bool IsThreadReset()
+	{
+		lock (_lock)
+			return NativeBindings.lua_isthreadreset(_state) != 0;
 	}
 
 	public int Yield(int nresults)
@@ -797,7 +837,8 @@ public partial class LuaState : IDisposable
 		{
 			if (!_disposed && _state != IntPtr.Zero)
 			{
-				NativeBindings.lua_close(_state);
+				if (_ownsState)
+					NativeBindings.lua_close(_state);
 				_state = IntPtr.Zero;
 				_disposed = true;
 			}

@@ -17,6 +17,7 @@ using Polytoria.Utils.DTOs;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 using Polytoria.Providers.PlayerMovement;
 
 namespace Polytoria.Datamodel;
@@ -40,18 +41,21 @@ public sealed partial class Player : NPC
 
 	private float _respawnTime = 5.0f;
 	private bool _canMove = true;
+	private bool _canJumpWhileClimbing = true;
 	private float _sprintSpeed;
 	private float _stamina = 0;
 	private float _maxStamina = 3;
 	private bool _useStamina = true;
 	private float _staminaRegen = 1.2f;
 	private float _staminaBurn = 1.2f;
+	private bool _keepInventory = false;
 	private bool _useHeadTurning = false;
 	private int _userID;
 	private bool _useBubbleChat = true;
 	private bool _autoLoadAppearance = true;
 	private bool _allowAnimationWhileMoving = false;
 	private PlayerMovementModeEnum _movementMode = PlayerMovementModeEnum.Default;
+	private PlayerRotationModeEnum _rotationMode = PlayerRotationModeEnum.Automatic;
 	private Team? _team;
 	private Color _chatColorBeforeTeam;
 
@@ -67,12 +71,14 @@ public sealed partial class Player : NPC
 	private RemoteTransform3D _remoteCamAttach = null!;
 	internal Dynamic CamAttach = null!;
 	private Physical? _mouseHoveringOn;
+	private Physical? _grabbing;
 
 	private Vector3 DefaultSpawnLocation = new(0, 5, 0);
 	internal event Action<APIUserInfo>? UserInfoReady;
 
 #if CREATOR
 	private bool _spawnedAtCreatorPos = false;
+	private bool _spawnedAtCreatorRot = false;
 #endif
 
 	// internal peer ID
@@ -98,6 +104,12 @@ public sealed partial class Player : NPC
 
 	[ScriptProperty]
 	public PTSignal Respawned { get; private set; } = new();
+
+	[ScriptProperty]
+	public PTSignal<Physical> Grabbed { get; private set; } = new();
+
+	[ScriptProperty]
+	public PTSignal<Physical> Ungrabbed { get; private set; } = new();
 
 	[SyncVar, ScriptProperty]
 	public int UserID
@@ -202,6 +214,17 @@ public sealed partial class Player : NPC
 	}
 
 	[Editable, ScriptProperty]
+	public bool KeepInventory
+	{
+		get => _keepInventory;
+		set
+		{
+			_keepInventory = value;
+			OnPropertyChanged();
+		}
+	}
+
+	[Editable, ScriptProperty]
 	public bool UseHeadTurning
 	{
 		get => _useHeadTurning;
@@ -286,6 +309,32 @@ public sealed partial class Player : NPC
 
 			OnPropertyChanged();
 		}
+	}
+
+	[Editable, ScriptProperty]
+	public PlayerRotationModeEnum RotationMode
+	{
+		get => _rotationMode;
+		set
+		{
+			_rotationMode = value;
+			OnPropertyChanged();
+		}
+	}
+
+	[ScriptProperty]
+	public Physical? Grabbing => _grabbing;
+
+	public void SetGrabbing(Physical phy)
+	{
+		_grabbing = phy;
+		Grabbed.Invoke(phy);
+	}
+
+	public void ReleaseGrabbing()
+	{
+		Ungrabbed.Invoke(_grabbing);
+		_grabbing = null;
 	}
 
 	[ScriptProperty]
@@ -534,6 +583,10 @@ public sealed partial class Player : NPC
 	public override void Process(double delta)
 	{
 		base.Process(delta);
+		if (!Root.Network.IsServer)
+		{
+			UpdateCamera(delta);
+		}
 		if (!IsLocal)
 		{
 			UpdateTransformTick(delta);
@@ -550,55 +603,6 @@ public sealed partial class Player : NPC
 		{
 			return;
 		}
-
-		if (Anchored)
-		{
-			// just in case it's anchored cuz ragdoll
-			if (Character is PolytorianModel pt && pt.Ragdolling == false)
-			{
-				UpdateCamera(delta);
-			}
-			AfkTick(delta);
-			return;
-		}
-
-		Camera? cam = Root.Environment.CurrentCamera;
-
-		// Apply camera modifier if enabled
-		if (UseHeadTurning && cam != null && cam.Mode == Camera.CameraModeEnum.Follow && cam.Target == CamAttach)
-		{
-			Character?.ApplyCameraModifier(cam);
-		}
-
-		if (IsSitting)
-		{
-			// Add stamina while sitting
-			AddStaminaTick(delta);
-			UpdateCamera(delta);
-			return;
-		}
-
-		if (PlayerMovement != null)
-		{
-			var snapshot = PlayerMovement.SampleInput(delta);
-			PlayerMovement.ProcessInput(snapshot);
-		}
-		else
-		{
-			IsMoving = Velocity.Length() > 0.01f;
-		}
-
-		// Stop animation on move
-		if (IsMoving && !AllowAnimationWhileMoving)
-		{
-			Character?.Animator?.StopAnimation();
-		}
-
-		// Update camera right after position set
-		UpdateCamera(delta);
-		AfkTick(delta);
-
-		ApplyPushForce();
 	}
 
 	private void UpdateCamera(double delta)
@@ -664,6 +668,8 @@ public sealed partial class Player : NPC
 
 	public override void PhysicsProcess(double delta)
 	{
+		base.PhysicsProcess(delta);
+
 		if (Root.SessionType != World.SessionTypeEnum.Client || !IsLocal || !IsReady) { return; }
 
 		if (Character is PolytorianModel pt && pt.Ragdolling)
@@ -673,15 +679,23 @@ public sealed partial class Player : NPC
 			return;
 		}
 
-		Environment.RayResult? ray = Root.Environment.CurrentCamera?.ScreenPointToRay(Root.Input.MousePosition);
+		Environment.RayResult? ray = Root.Environment.CurrentCamera?.ScreenPointToRay(Root.Input.MousePosition, passthroughMask: 1 << 0);
 		if (ray.HasValue && ray.Value.Instance is Physical p)
 		{
-			if (_mouseHoveringOn != null && _mouseHoveringOn != p)
+			if (_mouseHoveringOn != p)
 			{
-				_mouseHoveringOn.MouseExit.Invoke();
+				if (_mouseHoveringOn != null)
+				{
+					_mouseHoveringOn.MouseExit.Invoke();
+				}
+				_mouseHoveringOn = p;
+				_mouseHoveringOn.MouseEnter.Invoke();
 			}
-			_mouseHoveringOn = p;
-			_mouseHoveringOn.MouseEnter.Invoke();
+		}
+		else if (_mouseHoveringOn != null)
+		{
+			_mouseHoveringOn.MouseExit.Invoke();
+			_mouseHoveringOn = null;
 		}
 
 		if (FootFwdRaycast.IsColliding())
@@ -689,13 +703,10 @@ public sealed partial class Player : NPC
 			Node collider = (Node)FootFwdRaycast.GetCollider();
 			if (collider != null && GetNetObjFromProxy(collider) is Truss truss)
 			{
-				if (!IsClimbing)
+				if (!IsClimbing && !ClimbDebounce && truss.Climbable)
 				{
-					if (ClimbDebounce)
-					{
-						return;
-					}
 					ClimbingTruss = truss;
+					_canJumpWhileClimbing = false;
 					IsClimbing = true;
 					Character?.PlayClimb();
 				}
@@ -710,7 +721,52 @@ public sealed partial class Player : NPC
 			EndClimb();
 		}
 
-		base.PhysicsProcess(delta);
+		if (Anchored)
+		{
+			// just in case it's anchored cuz ragdoll
+			if (Character is PolytorianModel pt2 && pt2.Ragdolling == false)
+			{
+				UpdateCamera(delta);
+			}
+			AfkTick(delta);
+			return;
+		}
+
+		Camera? cam = Root.Environment.CurrentCamera;
+
+		// Apply camera modifier if enabled
+		if (UseHeadTurning && cam != null && cam.Mode == Camera.CameraModeEnum.Follow && cam.Target == CamAttach)
+		{
+			Character?.ApplyCameraModifier(cam);
+		}
+
+		if (IsSitting)
+		{
+			// Add stamina while sitting
+			AddStaminaTick(delta);
+			UpdateCamera(delta);
+			return;
+		}
+
+		if (PlayerMovement != null)
+		{
+			var snapshot = PlayerMovement.SampleInput(delta);
+			PlayerMovement.ProcessInput(snapshot);
+		}
+		else
+		{
+			IsMoving = Velocity.Length() > 0.01f;
+		}
+
+		// Stop animation on move
+		if (IsMoving && !AllowAnimationWhileMoving)
+		{
+			Character?.Animator?.StopAnimation();
+		}
+
+		AfkTick(delta);
+
+		ApplyPushForce();
 	}
 
 	internal void EndClimb()
@@ -749,7 +805,7 @@ public sealed partial class Player : NPC
 
 		if (@event.IsActionPressed("activate"))
 		{
-			Environment.RayResult? ray = Root.Environment.CurrentCamera?.ScreenPointToRay(Root.Input.MousePosition);
+			Environment.RayResult? ray = Root.Environment.CurrentCamera?.ScreenPointToRay(Root.Input.MousePosition, passthroughMask: 1 << 1);
 			if (ray.HasValue && ray.Value.Instance is Physical p)
 			{
 				p.InvokeClicked(this);
@@ -777,6 +833,7 @@ public sealed partial class Player : NPC
 			// Ignore jump command if is custom
 			if (MovementMode == PlayerMovementModeEnum.Scripted) return;
 			if (!CanMove) return;
+			_canJumpWhileClimbing = true;
 			Jump();
 		}
 		else if (@event.IsActionPressed("toggle_sprint"))
@@ -891,10 +948,13 @@ public sealed partial class Player : NPC
 	public override void Jump()
 	{
 		base.Jump();
-		if (IsClimbing)
+		if (_canJumpWhileClimbing)
 		{
-			EndClimb();
-			ClimbDebounce = true;
+			if (IsClimbing)
+			{
+				EndClimb();
+				ClimbDebounce = true;
+			}
 		}
 	}
 
@@ -912,29 +972,43 @@ public sealed partial class Player : NPC
 		_bubbleChat.Visible = true;
 	}
 
-	public void WrapToSpawnPoint()
+	public async Task WarpToSpawnPoint()
 	{
 		if (Root.Environment.SpawnPoints.Count > 0)
 		{
 			Entity spawnpoint = ArrayUtils.GetRandom(Root.Environment.SpawnPoints);
-			Position = spawnpoint.Position + new Vector3(0, spawnpoint.Size.Y + 2.0f, 0);
-			Rotation = new(0, spawnpoint.Rotation.Y, 0);
+			Position = spawnpoint.Position + spawnpoint.Up * (spawnpoint.Size.Y / 2 + 3.0f);
+			Quaternion = new Quaternion(spawnpoint.Up, Vertical) * spawnpoint.Quaternion;
 		}
 		else
 		{
 			Position = DefaultSpawnLocation;
-			Rotation = new(0, 0, 0);
+			Quaternion = new Quaternion(Vector3.Up, Vertical);
 		}
 
-		// Spawn at custom position
+		// Spawn at custom position and rotation
 #if CREATOR
-		if (Root.Entry != null && Root.Entry.DebugSpawnPos != null)
+		if (Root.Entry != null && Root.Entry.DebugSpawnPos != null && Root.Entry.DebugSpawnRot != null)
 		{
 			if (!_spawnedAtCreatorPos)
 			{
 				_spawnedAtCreatorPos = true;
 				Position = Root.Entry.DebugSpawnPos.Value;
-				Rotation = Vector3.Zero;
+			}
+			if (!_spawnedAtCreatorRot)
+			{
+				_spawnedAtCreatorRot = true;
+				Rotation = new(
+					0,
+					Root.Entry.DebugSpawnRot.Value,
+					0
+				);
+				while (Root.Environment.CurrentCamera == null) await Task.Delay(100);
+				Root.Environment.CurrentCamera.RotationOffset = new Vector3(
+					0,
+					Root.Entry.DebugSpawnRot.Value,
+					0
+				);
 			}
 		}
 #endif
@@ -1018,6 +1092,7 @@ public sealed partial class Player : NPC
 		StaminaBurn = Root.PlayerDefaults.StaminaBurn;
 		JumpPower = Root.PlayerDefaults.JumpPower;
 		RespawnTime = Root.PlayerDefaults.RespawnTime;
+		KeepInventory = Root.PlayerDefaults.KeepInventory;
 		UseHeadTurning = Root.PlayerDefaults.UseHeadTurning;
 		UseBubbleChat = Root.PlayerDefaults.UseBubbleChat;
 		AutoLoadAppearance = Root.PlayerDefaults.AutoLoadAppearance;
@@ -1030,7 +1105,7 @@ public sealed partial class Player : NPC
 		Velocity = Vector3.Zero;
 
 		ResetAppearance();
-		WrapToSpawnPoint();
+		WarpToSpawnPoint();
 
 		Health = MaxHealth;
 		Anchored = false;
@@ -1043,9 +1118,12 @@ public sealed partial class Player : NPC
 		// Only allow this operation in server
 		if (!Root.Network.IsServer) return;
 
-		foreach (Instance item in Inventory.GetChildren())
+		if (!KeepInventory)
 		{
-			item.Delete();
+			foreach (Instance item in Inventory.GetChildren())
+			{
+				item.Delete();
+			}
 		}
 
 		if (Root.PlayerDefaults.Inventory != null)
@@ -1118,5 +1196,14 @@ public sealed partial class Player : NPC
 	{
 		Default,
 		Scripted
+	}
+
+	[ScriptEnum]
+	public enum PlayerRotationModeEnum
+	{
+		Automatic, // Default value (works how it did before), automatically switches between rotating to movement or facing camera when Ctrl Locked or in First Person
+		CameraLocked,
+		Movement,
+		MovementCtrlLockOnly // separate version that still locks in First Person, will only rotate to movement when Ctrl Locked
 	}
 }
